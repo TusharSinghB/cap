@@ -11,6 +11,7 @@ from langchain.prompts import PromptTemplate
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain.memory import ConversationBufferMemory
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
+from langchain.chains import LLMChain
 
 # === Load environment
 load_dotenv()
@@ -60,7 +61,7 @@ Your job is to classify the intent and generate appropriate Python code or skip 
 
 ### 🔍 1. Intent Classification
 
-Categorize the user request into one of the following:
+Categorize the user request into one of the following:  
 - **"question"**: e.g., "What is the average price?", "Which brand has the most products?"
 - **"analysis"**: e.g., grouping, correlation, filtering, statistical summaries
 - **"visualization"**: e.g., bar chart, histogram, scatter plot
@@ -76,15 +77,30 @@ Categorize the user request into one of the following:
 - Handle missing values using `.dropna()`, `fillna()`, etc.
 - If the request is for **summary**, **insights**, or **brief explanation**, include:
 - Proper `print()` statements for all outputs
+- A final line: `print("__NEEDS_INTERPRETATION__")` so the system can interpret the results
+
 
 ---
+### 🧩 3. Driver Analysis Rules 
+If the user intent is driver_analysis:
+Assume the target variable is mentioned or implied in the user query (e.g., “price”, “sales”, “churn”)
+Use a tree-based model: RandomForestRegressor (for numeric target) or RandomForestClassifier (for categorical)
+Encode:
+Categorical features using LabelEncoder
+Ordinal features (if known) using OneHotEncoder
+Perform analysis on copy_df, not the original df
+After model training:
+Extract .feature_importances_
+Sort them in descending order
+Print a pandas Series or DataFrame of top features with importance scores
+Generate a plot using  plotly:
 
-### 🧩 3. Driver Analysis Rules
+Labels = feature names
+Values = importance scores
+Include meaningful title
+Add this line in code print("__NEEDS_INTERPRETATION__")
 
-If the user intent is **driver_analysis**:
-- Use a tree-based model like `RandomForestRegressor` or `RandomForestClassifier` from `sklearn`
-- Encode categorical features using `LabelEncoder`
-- Identify the target variable based on user query (e.g., “price”, “churn”, etc.)
+
 
 ---
 📊 4. Visualization Rules (Updated)
@@ -113,7 +129,38 @@ fig.update_layout(
     yaxis_title="Average Price",
     xaxis=dict(type='category')
 )
+Example
+```
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import LabelEncoder
+import matplotlib.pyplot as plt
 
+copy_df = df.copy()
+copy_df = copy_df.dropna(subset=['SALES'])
+
+# Encode categorical variables
+for col in copy_df.select_dtypes(include='object').columns:
+    copy_df[col] = LabelEncoder().fit_transform(copy_df[col])
+
+X = copy_df.drop(columns=['SALES'])
+y = copy_df['SALES']
+
+model = RandomForestRegressor()
+model.fit(X, y)
+
+importances = pd.Series(model.feature_importances_, index=X.columns)
+top_features = importances.sort_values(ascending=False).head(10)
+
+print("Top Driver Features:\n", top_features)
+
+# Plot pie chart
+plt.figure(figsize=(8, 8))
+plt.pie(top_features.values, labels=top_features.index, autopct='%1.1f%%', startangle=140)
+plt.title("Top Drivers Influencing SALES")
+plt.tight_layout()
+plt.show()
+
+print("__NEEDS_INTERPRETATION__")
 ```
 ---
 
@@ -143,9 +190,51 @@ ALways create a copy of df named as copy_df and perform operation on copy_df
 '''
             )
 
+prompt_2 = PromptTemplate(
+                input_variables=["request", "code", "output"],
+                template='''
+You are an AI data assistant. Your task is to generate a short and readable summary for the user based on the following:
+
+- question: {request}
+- code: {code}
+- output: {output}
+
+### Instructions:
+- Keep the summary **brief and human-friendly**
+- Do **not** repeat the entire output unless necessary (e.g., list of values)
+- Highlight important information using **bold**
+- Use natural phrasing (e.g., "The average price is **24.34**")
+- Avoid redundant phrases like "The output lists..." or "The result is...
+
+Driver Driver output code in tabular format
+📄 Driver Analysis Report Template
+Rank | Feature | Importance Score | Interpretation
+example
+```
+   Rank        Feature  Importance Score               Interpretation
+   1     PRODUCTLINE             0.25  Interpretation for PRODUCTLINE
+   2        DEALSIZE             0.20  Interpretation for DEALSIZE
+   3  QUANTITYORDERED            0.15  Interpretation for QUANTITYORDERED
+   4         COUNTRY             0.12  Interpretation for COUNTRY
+```
+
+### Output Format:
+Return only the final user-friendly summary. Do **not** include any labels like "llm output" or examples.
+
+### Example 1
+Question: What is the average price?
+Output: 24.34  
+✅ Final Summary: The average price is **24.34**
+
+### Example 2  
+Question: What are the unique brands in the dataset?  
+Output: Honda, Toyota, Ford, BMW  
+✅ Final Summary: The dataset includes the brands: **Honda**, **Toyota**, **Ford**, and **BMW**.
+'''
+
+            )
 # === Chat memory setup
 def get_session_history(session_id: str):
-
     if session_id not in chat_histories:
         chat_histories[session_id] = StreamlitChatMessageHistory()
     return chat_histories[session_id]
@@ -222,13 +311,43 @@ class InterpretationRequest(BaseModel):
     code: str
     output: str
 
-# @app.post("/interpret/")
-# async def interpret_output(payload: InterpretationRequest):
-#     chain = LLMChain(llm=llm, prompt=prompt_2)
-#     result = chain.run({
-#         "request": payload.question,
-#         "code": payload.code,
-#         "output": payload.output
-#     })
-#     return {"response": result}
+@app.post("/interpret/")
+async def interpret_output(payload: InterpretationRequest):
+    chain = LLMChain(llm=llm, prompt=prompt_2)
+    result = chain.run({
+        "request": payload.question,
+        "code": payload.code,
+        "output": payload.output
+    })
+    return {"response": result}
 
+# ------------------------------------------------------------------------------------------------------------
+# Unstructured Data
+
+from PyPDF2 import PdfReader
+import csv
+def extract_text_from_pdf(pdf_file):
+    reader = PdfReader(pdf_file)
+    text = ''
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text
+    return text
+def extract_text_from_txt(txt_file):
+    return txt_file.read().decode('utf-8')
+
+@app.post("/extract-pdf-text/")
+async def extract_pdf_text(file: str):
+    try:
+        text = extract_text_from_pdf(file)
+        return {"text": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to extract PDF text: {str(e)}")
+    
+@app.post("/extract-txt/")
+async def extract_txt(file:str):
+    try:
+        return {"text":extract_text_from_txt(file)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to extract text document: {str(e)}")

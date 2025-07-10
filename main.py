@@ -10,6 +10,7 @@ import plotly.express as px
 from PIL import Image
 import io
 import sys
+import traceback
 
 # Q&A imports (for txt/pdf)
 from backend.file_processing import extract_text_from_pdf, extract_text_from_txt
@@ -98,11 +99,23 @@ def process_csv(file):
                     exec(code, exec_globals)
                     output_text = buffer.getvalue()
                     sys.stdout = old_stdout
-
                     if output_type == "plotly" and "fig" in exec_globals:
                         fig = exec_globals["fig"]
                     elif output_type == "plot":
                         fig = plt.gcf()
+                    if "__NEEDS_INTERPRETATION__" in code:
+                        output_text = output_text.replace("__NEEDS_INTERPRETATION__", "").strip()
+                        payload = {"question": user_input, "code":code, "output":output_text}
+                        response = requests.post(f"{API_BASE_URL}/interpret/", json=payload)
+                        if response.status_code != 200:
+                            st.error(f"Backend error: {response.text}")
+                            return
+                        response = response.json()
+                        response_text = response.get("response","")
+                        print("--------------------------------------------------------")
+                        print("Output_Text", output_text)
+                        print(response_text)
+
                 except Exception as e:
                     sys.stdout = old_stdout
                     output_text = f"⚠️ Error executing code:\n{traceback.format_exc()}"
@@ -127,14 +140,15 @@ def process_csv(file):
 
         st.chat_message("user").markdown(item["user"])
         with st.chat_message("assistant"):
+            st.markdown(item["response"])
             if item["type"] == "plotly" and item["fig"]:
-                st.plotly_chart(item["fig"], use_container_width=True)
+                st.plotly_chart(item["fig"], use_container_width=False)
             elif item["type"] == "matplotlib" and item["fig"]:
+
                 st.pyplot(item["fig"])
                 plt.clf()
                 plt.close()
-            else:
-                st.markdown(item["response"])
+            
 
             if item.get("code"):
                 with st.expander("🔍 View Generated Code"):
